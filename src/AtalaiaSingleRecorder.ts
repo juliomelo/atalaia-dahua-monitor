@@ -1,11 +1,13 @@
 import { ChildProcess, exec } from 'node:child_process';
 import AtalaiaAMQP from './AtalaiaAMQP';
-import { IAtalaiaRecorder } from './IAtalaiaRecorder';
+import { IAtalaiaEvent, IAtalaiaRecorder } from './IAtalaiaRecorder';
 import { debugLog } from './debug';
 
 interface IRecordingData {
     process: ChildProcess;
-    smart: boolean;
+    movementDetected: boolean;
+    personDetected: boolean;
+    buffer: string;
 }
 
 export default class AtalaiaSingleRecorder implements IAtalaiaRecorder {
@@ -14,76 +16,130 @@ export default class AtalaiaSingleRecorder implements IAtalaiaRecorder {
     private readonly videoUrl: string;
     private readonly atalaiaQueue: AtalaiaAMQP;
     private readonly channel: number;
+    private readonly maxTotalMs: number;
+    private readonly postStopMs: number;
 
-    constructor({ videoUrl, atalaiaQueue, channel }: {
+    constructor({ videoUrl, atalaiaQueue, channel, maxTotalMs, postStopMs }: {
         videoUrl: string;
         atalaiaQueue: AtalaiaAMQP;
         channel: number;
+        maxTotalMs?: number;
+        postStopMs?: number;
     }) {
         this.videoUrl = videoUrl;
         this.atalaiaQueue = atalaiaQueue;
         this.channel = channel;
+        this.maxTotalMs = maxTotalMs ?? 10_000;
+        this.postStopMs = postStopMs ?? 5_000;
     }
 
     notifyMovement(smart?: boolean): void {
-        this.record(smart ?? false).catch(() => {})
+        this.notify({ kind: 'movement', action: 'pulse', smart: smart ?? false });
     }
 
     notifyPerson(): void {
-        const channel = this.channel;
-        debugLog('Person detected on channel', channel);
-        this.humanDetected = true;
+        this.notify({ kind: 'person', action: 'pulse' });
     }
- 
-    private record(smart: boolean): Promise<string> {
-        if (this.movementRecording) {
-            return Promise.reject();
-        }
 
+    notify(event: IAtalaiaEvent): void {
         const now = new Date().getHours();
 
         if (this.channel > 4 && (now < 22 || now >= 7)) {
-            debugLog('Ignoring movement on channel', this.channel, 'time', now);
+            debugLog('Ignoring event on channel', this.channel, 'time', now, event.kind, event.action);
             this.humanDetected = false;
-            return Promise.reject();
+            return;
+        }
+
+        if (event.kind === 'movement' && event.smart && event.action !== 'stop' && !this.humanDetected) {
+            return;
+        }
+
+        const recording = this.ensureProcess();
+        if (!recording) {
+            return;
+        }
+
+        if (event.kind === 'person' && event.action !== 'stop') {
+            recording.personDetected = true;
+            this.humanDetected = true;
+        }
+
+        if (event.kind === 'movement' && !event.smart && event.action !== 'stop') {
+            recording.movementDetected = true;
+        }
+
+        recording.process.stdin?.write(`${event.kind} ${event.action}\n`);
+    }
+ 
+    private ensureProcess(): IRecordingData | null {
+        if (this.movementRecording) {
+            return this.movementRecording;
         }
 
         debugLog('Recording video', this.channel);
 
-        return new Promise((resolve, reject) => {
-            const p = exec(`atalaia-streaming movements -s '${this.videoUrl}'`, { encoding: 'utf-8' }, (error, stdout, stderr) => {
-                if (!error) {
-                    const match = stdout.match(/^movement\s+(\S+?$)/m);
-                    const filename = match ? match[1] : null;
-                    debugLog('VideoMotion detected', this.channel, filename);
+        const maxTotalSeconds = Math.max(1, Math.ceil(this.maxTotalMs / 1000));
+        const postStopSeconds = Math.max(1, Math.ceil(this.postStopMs / 1000));
+        const p = exec(`atalaia-streaming movements -s '${this.videoUrl}' --max-seconds ${maxTotalSeconds} --post-stop-seconds ${postStopSeconds}`, { encoding: 'utf-8' }, (error, _stdout, stderr) => {
+            if (error) {
+                console.error('Error recording video:', error);
+                if (stderr) {
+                    console.error(stderr);
+                }
+            }
 
-                    if (filename) {
-                        if (this.humanDetected) {
-                            debugLog(`Human detected on channel ${this.channel}, notifying person:`, filename);
-                            this.atalaiaQueue.notifyPerson(filename);
-                            this.humanDetected = false;
-                        } else if (!smart) {
-                            debugLog('Notifying movement:', filename);
-                            this.atalaiaQueue.notifyMovement(filename);
-                        }
+            this.movementRecording = null;
+            this.humanDetected = false;
+        });
 
-                        resolve(filename);
-                    } else {
-                        reject(new Error(stdout));
-                    }
-                } else {
-                    console.error('Error recording video:', error);
-                    reject(new Error(stderr));
+        const movementRecording: IRecordingData = {
+            process: p,
+            movementDetected: false,
+            personDetected: false,
+            buffer: ''
+        };
+
+        if (p.stdout) {
+            p.stdout.on('data', (data: string | Buffer) => {
+                this.handleStdout(movementRecording, data.toString());
+            });
+            p.stdout.pipe(process.stdout);
+        }
+
+        this.movementRecording = movementRecording;
+        return movementRecording;
+    }
+
+    private handleStdout(recording: IRecordingData, chunk: string): void {
+        recording.buffer += chunk;
+
+        let newline = recording.buffer.indexOf('\n');
+
+        while (newline >= 0) {
+            const line = recording.buffer.slice(0, newline).trim();
+            recording.buffer = recording.buffer.slice(newline + 1);
+
+            const match = /^movement\s+(\S+)$/.exec(line);
+            const filename = match ? match[1] : null;
+
+            if (filename) {
+                debugLog('VideoMotion detected', this.channel, filename);
+
+                if (recording.personDetected || this.humanDetected) {
+                    debugLog(`Human detected on channel ${this.channel}, notifying person:`, filename);
+                    this.atalaiaQueue.notifyPerson(filename);
+                } else if (recording.movementDetected) {
+                    debugLog('Notifying movement:', filename);
+                    this.atalaiaQueue.notifyMovement(filename);
                 }
 
-                this.movementRecording = null;
-            });
+                recording.personDetected = false;
+                recording.movementDetected = false;
+                this.humanDetected = false;
+            }
 
-            if (p.stdout) p.stdout.pipe(process.stdout);
-            // if (p.stderr) p.stderr.pipe(process.stderr);
-
-            this.movementRecording = { process: p, smart };
-        });
+            newline = recording.buffer.indexOf('\n');
+        }
     }
 
     close(): void {

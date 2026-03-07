@@ -2,7 +2,7 @@ import AtalaiaAMQP from './AtalaiaAMQP.js';
 import AtalaiaPassiveRecorder, { NotifyAs } from './AtalaiaPassiveRecorder.js';
 import AtalaiaSingleRecorder from './AtalaiaSingleRecorder.js';
 import DahuaConnection from './dahua/DahuaConnection.js';
-import DahuaEventListener, { ISmartMotionHuman, IVideoMotion } from './dahua/DahuaEventListener.js';
+import DahuaEventListener, { DahuaAction, ISmartMotionHuman, IVideoMotion } from './dahua/DahuaEventListener.js';
 import DahuaSystem from './dahua/DahuaSystem.js';
 import DahuaVideo from './dahua/DahuaVideo.js';
 import { IAtalaiaRecorder } from './IAtalaiaRecorder.js';
@@ -102,14 +102,14 @@ const haIntegration = new HomeAssistantIntegration(mqttUrl, connection, eventLis
 console.info('[MAIN] HomeAssistantIntegration criado e configurado');
 
 // Conecta eventos do DahuaEventListener ao RecorderManager
-eventListener.addEventListener('VideoMotion', function VideoMotion(action: string, index: number, event: IVideoMotion) {
+eventListener.addEventListener('VideoMotion', function VideoMotion(action: DahuaAction, index: number, event: IVideoMotion) {
     const channel = index + 1;
-    recorderManager.onVideoMotion(channel, event);
+    recorderManager.onVideoMotion(channel, action, event);
 });
 
-eventListener.addEventListener('SmartMotionHuman', function SmartMotionHuman(action: string, index: number, event: ISmartMotionHuman) {
+eventListener.addEventListener('SmartMotionHuman', function SmartMotionHuman(action: DahuaAction, index: number, event: ISmartMotionHuman) {
     const channel = index + 1;
-    recorderManager.onPersonDetected(channel, event);
+    recorderManager.onPersonDetected(channel, action, event);
 });
 
 console.info('[MAIN] Event listeners conectados ao RecorderManager');

@@ -1,9 +1,9 @@
 import AtalaiaAMQP from './AtalaiaAMQP.js';
 import AtalaiaRTSPRecorder from './AtalaiaRTSPRecorder.js';
 import AtalaiaSingleRecorder from './AtalaiaSingleRecorder.js';
-import { ISmartMotionHuman, IVideoMotion } from './dahua/DahuaEventListener.js';
+import { DahuaAction, ISmartMotionHuman, IVideoMotion } from './dahua/DahuaEventListener.js';
 import { debugLog } from './debug.js';
-import { IAtalaiaRecorder } from './IAtalaiaRecorder.js';
+import { AtalaiaEventAction, IAtalaiaRecorder } from './IAtalaiaRecorder.js';
 
 export interface RecorderManagerConfig {
     username: string;
@@ -32,6 +32,19 @@ export default class RecorderManager {
         // Por padrão, todos os canais começam desabilitados
         for (let i = 1; i <= config.numChannels; i++) {
             this.recordingEnabled.set(i, false);
+        }
+    }
+
+    private static toAction(action: DahuaAction): AtalaiaEventAction {
+        switch (action) {
+            case DahuaAction.START:
+                return 'start';
+
+            case DahuaAction.STOP:
+                return 'stop';
+
+            default:
+                return 'pulse';
         }
     }
 
@@ -121,47 +134,57 @@ export default class RecorderManager {
     /**
      * Processa evento de movimento de vídeo
      */
-    public onVideoMotion(channel: number, event: IVideoMotion): void {
+    public onVideoMotion(channel: number, action: DahuaAction, event: IVideoMotion): void {
         if (!this.isChannelEnabled(channel)) {
             return;
         }
 
-        if (!event.SmartMotionEnable) {
-            return;
-        }
+        const recorderAction = RecorderManager.toAction(action);
 
         // Se há gravação manual em andamento, ignora eventos automáticos
-        if (this.manualRecorders.has(channel)) {
+        const manualRecorder = this.manualRecorders.get(channel);
+        if (manualRecorder) {
             debugLog(`[RecorderManager] Ignorando evento de movimento no canal ${channel} (gravação manual em andamento)`);
+            manualRecorder.notify({
+                kind: 'movement',
+                action: recorderAction,
+                smart: event.SmartMotionEnable
+            });
             return;
         }
 
         const recorder = this.recorders.get(channel);
         if (recorder) {
-            recorder.notifyMovement(event.SmartMotionEnable);
+            recorder.notify({
+                kind: 'movement',
+                action: recorderAction,
+                smart: event.SmartMotionEnable
+            });
         }
     }
 
     /**
      * Processa evento de detecção de pessoa
      */
-    public onPersonDetected(channel: number, event: ISmartMotionHuman): void {
+    public onPersonDetected(channel: number, action: DahuaAction, event: ISmartMotionHuman): void {
         if (!this.isChannelEnabled(channel)) {
             return;
         }
+
+        const recorderAction = RecorderManager.toAction(action);
 
         // Se há gravação manual em andamento, notifica o recorder manual
         const manualRecorder = this.manualRecorders.get(channel);
         if (manualRecorder) {
             debugLog(`[RecorderManager] Pessoa detectada no canal ${channel} durante gravação manual`);
-            manualRecorder.notifyPerson();
+            manualRecorder.notify({ kind: 'person', action: recorderAction });
             return;
         }
 
         const recorder = this.recorders.get(channel);
         if (recorder) {
             debugLog(`[RecorderManager] Pessoa detectada no canal ${channel}`);
-            recorder.notifyPerson();
+            recorder.notify({ kind: 'person', action: recorderAction });
         } else {
             console.warn(`[RecorderManager] Pessoa detectada no canal ${channel}, mas recorder não existe`);
         }

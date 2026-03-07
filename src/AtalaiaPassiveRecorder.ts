@@ -1,7 +1,7 @@
 import { exec } from 'node:child_process';
 import AtalaiaAMQP from './AtalaiaAMQP';
 import { unlink } from 'node:fs';
-import { IAtalaiaRecorder } from './IAtalaiaRecorder';
+import { IAtalaiaEvent, IAtalaiaRecorder } from './IAtalaiaRecorder';
 import { debugLog } from './debug';
 
 export enum NotifyAs {
@@ -16,24 +16,33 @@ export interface AtalaiaPassiveRecorderConfig {
     channel: number;
     movementNotify?: NotifyAs;
     personNotify?: NotifyAs;
+    maxTotalMs?: number;
+    postStopMs?: number;
 }
 
 export default class AtalaiaPassiveRecorder implements IAtalaiaRecorder {
-    private humanDetected = false;
-    private smart = false;
+    private personDetected = false;
+    private movementDetected = false;
     private atalaiaProcess: ReturnType<typeof exec>;
     private readonly atalaiaQueue: AtalaiaAMQP;
     private readonly channel: number;
     private readonly movementNotify: NotifyAs;
     private readonly personNotify: NotifyAs;
+    private readonly maxTotalMs: number;
+    private readonly postStopMs: number;
 
-    constructor({ videoUrl, atalaiaQueue, channel, movementNotify, personNotify }: AtalaiaPassiveRecorderConfig) {
+    constructor({ videoUrl, atalaiaQueue, channel, movementNotify, personNotify, maxTotalMs, postStopMs }: AtalaiaPassiveRecorderConfig) {
         this.atalaiaQueue = atalaiaQueue;
         this.channel = channel;
         this.movementNotify = movementNotify ?? NotifyAs.MOVEMENT;
         this.personNotify = personNotify ?? NotifyAs.PERSON;
+        this.maxTotalMs = maxTotalMs ?? 10_000;
+        this.postStopMs = postStopMs ?? 5_000;
 
-        const command = `atalaia-streaming movements -p '${videoUrl}'`;
+        const maxTotalSeconds = Math.max(1, Math.ceil(this.maxTotalMs / 1000));
+        const postStopSeconds = Math.max(1, Math.ceil(this.postStopMs / 1000));
+
+        const command = `atalaia-streaming movements -p '${videoUrl}' --max-seconds ${maxTotalSeconds} --post-stop-seconds ${postStopSeconds}`;
 
         // Create a process to run the atalaia-streaming command
         this.atalaiaProcess = exec(command, (error, stdout, stderr) => {
@@ -69,19 +78,27 @@ export default class AtalaiaPassiveRecorder implements IAtalaiaRecorder {
     }
 
     notifyMovement(smart = false) {
-        // Se está habilitada a detecção, então ignoramos.
-        if (smart) {
-            return;
-        }
-
-        this.smart = smart;
-        this.atalaiaProcess.stdin?.write('movement\n');
+        this.notify({ kind: 'movement', action: 'pulse', smart });
     }
 
     notifyPerson() {
-        this.humanDetected = true;
-        this.smart = true;
-        this.atalaiaProcess.stdin?.write('movement\n');
+        this.notify({ kind: 'person', action: 'pulse' });
+    }
+
+    notify(event: IAtalaiaEvent): void {
+        if (event.kind === 'movement' && event.smart && event.action !== 'stop' && !this.personDetected) {
+            return;
+        }
+
+        if (event.kind === 'person' && event.action !== 'stop') {
+            this.personDetected = true;
+        }
+
+        if (event.kind === 'movement' && !event.smart && event.action !== 'stop') {
+            this.movementDetected = true;
+        }
+
+        this.atalaiaProcess.stdin?.write(`${event.kind} ${event.action}\n`);
     }
 
     private handleStdout(data: string) {
@@ -89,12 +106,12 @@ export default class AtalaiaPassiveRecorder implements IAtalaiaRecorder {
         const filename = match ? match[1] : null;
 
         if (filename) {
-            debugLog('VideoMotion detected', this.channel, filename, this.humanDetected, this.smart);
+            debugLog('VideoMotion detected', this.channel, filename, this.personDetected, this.movementDetected);
 
-            if (this.humanDetected) {
+            if (this.personDetected) {
                 debugLog(`Human detected on channel ${this.channel}, notifying person:`, filename);
                 this.enqueue(this.personNotify, filename);
-            } else if (!this.smart) {
+            } else if (this.movementDetected) {
                 debugLog('Notifying movement:', filename);
                 this.enqueue(this.movementNotify, filename);
             } else {
@@ -123,7 +140,7 @@ export default class AtalaiaPassiveRecorder implements IAtalaiaRecorder {
     }
 
     private clear() {
-        this.humanDetected = false;
-        this.smart = false;
+        this.personDetected = false;
+        this.movementDetected = false;
     }
 }

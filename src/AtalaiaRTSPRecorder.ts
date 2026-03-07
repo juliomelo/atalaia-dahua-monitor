@@ -1,5 +1,5 @@
 import AtalaiaAMQP from './AtalaiaAMQP.js';
-import { IAtalaiaRecorder } from './IAtalaiaRecorder.js';
+import { IAtalaiaEvent, IAtalaiaRecorder } from './IAtalaiaRecorder.js';
 import DahuaRTSPStream from './dahua/DahuaRTSPStream.js';
 import DahuaRTSPRecorder from './dahua/DahuaRTSPRecorder.js';
 import { debugLog } from './debug.js';
@@ -18,6 +18,7 @@ export interface AtalaiaRTSPRecorderConfig {
 export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
     private recording: DahuaRTSPRecorder | null = null;
     private hasPerson = false;
+    private readonly activeTriggers = new Set<'movement' | 'person'>();
     private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
     private inactivityTimer: ReturnType<typeof setTimeout> | null = null;
     private finalizing = false;
@@ -50,15 +51,42 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
         this.recordingType = recordingType ?? 'auto';
     }
 
-    public notifyMovement(smart: boolean = false): void {
-        if (!smart || this.hasPerson) {
-            this.onActivity();
+    public notify(event: IAtalaiaEvent): void {
+        if (event.kind === 'person' && event.action !== 'stop') {
+            this.hasPerson = true;
+        }
+
+        if (event.kind === 'movement' && event.smart && event.action !== 'stop' && !this.hasPerson) {
+            return;
+        }
+
+        const inactivityMs = event.postStopMs ?? this.maxInactivityMs;
+
+        switch (event.action) {
+            case 'start':
+                this.activeTriggers.add(event.kind);
+                this.onActivity(inactivityMs);
+                break;
+
+            case 'stop':
+                this.activeTriggers.delete(event.kind);
+                if (this.activeTriggers.size === 0 && this.recording) {
+                    this.scheduleInactivityStop(inactivityMs);
+                }
+                break;
+
+            default:
+                this.onActivity(inactivityMs);
+                break;
         }
     }
 
+    public notifyMovement(smart: boolean = false): void {
+        this.notify({ kind: 'movement', action: 'pulse', smart });
+    }
+
     public notifyPerson(): void {
-        this.hasPerson = true;
-        this.onActivity();
+        this.notify({ kind: 'person', action: 'pulse' });
     }
 
     public close(): void {
@@ -66,6 +94,7 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
         const current = this.recording;
         this.recording = null;
         this.hasPerson = false;
+        this.activeTriggers.clear();
 
         if (!current) {
             return;
@@ -76,7 +105,7 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
         });
     }
 
-    private onActivity(): void {
+    private onActivity(inactivityMs = this.maxInactivityMs): void {
         if (!this.recording) {
             this.startRecording().catch((error: unknown) => {
                 console.error('Erro ao iniciar gravação RTSP:', error);
@@ -84,7 +113,7 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
             return;
         }
 
-        this.scheduleInactivityStop();
+        this.scheduleInactivityStop(inactivityMs);
     }
 
     private async startRecording(): Promise<void> {
@@ -109,10 +138,10 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
             });
         }, this.maxRecordingMs);
 
-        this.scheduleInactivityStop();
+        this.scheduleInactivityStop(this.maxInactivityMs);
     }
 
-    private scheduleInactivityStop(): void {
+    private scheduleInactivityStop(inactivityMs: number): void {
         if (this.inactivityTimer) {
             clearTimeout(this.inactivityTimer);
         }
@@ -121,7 +150,7 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
             this.finalizeRecording('inactivity').catch((error: unknown) => {
                 console.error('Erro ao finalizar por inatividade:', error);
             });
-        }, this.maxInactivityMs);
+        }, inactivityMs);
     }
 
     private clearTimers(): void {
@@ -177,6 +206,7 @@ export default class AtalaiaRTSPRecorder implements IAtalaiaRecorder {
             }
         } finally {
             this.hasPerson = false;
+            this.activeTriggers.clear();
             this.finalizing = false;
         }
     }
