@@ -1,4 +1,5 @@
 import DahuaConnection from './DahuaConnection.js';
+import { debugLog } from '../debug.js';
 
 export enum DahuaAction {
     START = 'start',
@@ -17,6 +18,13 @@ export default class DahuaEventListener {
 
     private readonly callbacks: ICallbacks = {};
     private readonly ignoredEvents = new Set<string>();
+    
+    // Controle de HeartBeat
+    private lastHeartbeatTime: number = Date.now();
+    private heartbeatHistory: number[] = [];
+    private expectedHeartbeatInterval: number = 60_000 * 5; // Valor inicial de 5 minutos
+    private heartbeatCheckTimer?: NodeJS.Timeout;
+    private isReconnecting = false;
 
     constructor(private readonly connection: DahuaConnection, private readonly events = ['All']) {
         this.connect().catch(e => {
@@ -26,6 +34,9 @@ export default class DahuaEventListener {
         this.callbacks.RecordDelete = [];
         this.callbacks.AlarmUserLogin = [];
         this.callbacks.InterVideoAccess = [];
+        
+        // Inicia o monitoramento de HeartBeat
+        this.startHeartbeatMonitoring();
     }
 
     addEventListener(event: 'VideoMotion', callback: DahuaEventCallback<IVideoMotion>): void;
@@ -36,6 +47,13 @@ export default class DahuaEventListener {
             this.callbacks[event].push(callback);
         } else {
             this.callbacks[event] = [callback];
+        }
+    }
+
+    public dispose() {
+        if (this.heartbeatCheckTimer) {
+            clearInterval(this.heartbeatCheckTimer);
+            this.heartbeatCheckTimer = undefined;
         }
     }
 
@@ -103,6 +121,7 @@ export default class DahuaEventListener {
 
         if (!m) {
             if (body === 'Heartbeat') {
+                this.onHeartbeat();
                 return;
             }
 
@@ -124,6 +143,83 @@ export default class DahuaEventListener {
         const json = data ? JSON.parse(data) : undefined;
 
         callbacks.forEach(callback => callback(action.toLowerCase() as DahuaAction, parseInt(index), json));
+    }
+
+    private onHeartbeat() {
+        const now = Date.now();
+        const interval = now - this.lastHeartbeatTime;
+        
+        // Adiciona o intervalo ao histórico (mantém últimos 10 heartbeats)
+        if (this.heartbeatHistory.length > 0) { // Ignora o primeiro intervalo
+            this.heartbeatHistory.push(interval);
+            if (this.heartbeatHistory.length > 10) {
+                this.heartbeatHistory.shift();
+            }
+            
+            // Calcula a média do intervalo
+            const avgInterval = this.heartbeatHistory.reduce((a, b) => a + b, 0) / this.heartbeatHistory.length;
+            this.expectedHeartbeatInterval = avgInterval;
+            
+            debugLog(`HeartBeat recebido. Intervalo: ${(interval / 1000).toFixed(1)}s, Média: ${(avgInterval / 1000).toFixed(1)}s`);
+        } else {
+            debugLog('Primeiro HeartBeat recebido');
+        }
+        
+        this.lastHeartbeatTime = now;
+    }
+
+    private startHeartbeatMonitoring() {
+        // Verifica a cada 10 segundos se o HeartBeat está sendo recebido
+        this.heartbeatCheckTimer = setInterval(() => {
+            this.checkHeartbeatTimeout();
+        }, 10000);
+    }
+
+    private checkHeartbeatTimeout() {
+        if (this.isReconnecting) {
+            return;
+        }
+
+        const now = Date.now();
+        const timeSinceLastHeartbeat = now - this.lastHeartbeatTime;
+        const maxAllowedInterval = this.expectedHeartbeatInterval * 2;
+
+        if (timeSinceLastHeartbeat > maxAllowedInterval) {
+            console.warn(
+                `HeartBeat não recebido há ${(timeSinceLastHeartbeat / 1000).toFixed(1)}s ` +
+                `(esperado: ${(this.expectedHeartbeatInterval / 1000).toFixed(1)}s, ` +
+                `limite: ${(maxAllowedInterval / 1000).toFixed(1)}s). Iniciando reconexão...`
+            );
+            this.reconnect();
+        }
+    }
+
+    private async reconnect() {
+        if (this.isReconnecting) {
+            return;
+        }
+
+        this.isReconnecting = true;
+        
+        try {
+            console.info('Reconectando ao Dahua Event Manager...');
+            
+            // Limpa o histórico de heartbeat
+            this.heartbeatHistory = [];
+            this.lastHeartbeatTime = Date.now();
+            
+            // Reconecta
+            await this.connect();
+            
+            this.isReconnecting = false;
+            console.info('Reconexão bem-sucedida!');
+        } catch (e) {
+            this.isReconnecting = false;
+            console.error('Falha na reconexão:', e);
+            
+            // Tenta reconectar novamente após 5 segundos
+            setTimeout(() => this.reconnect(), 5000);
+        }
     }
 }
 
