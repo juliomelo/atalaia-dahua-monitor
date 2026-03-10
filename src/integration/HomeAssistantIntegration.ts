@@ -182,7 +182,7 @@ export default class HomeAssistantIntegration {
     /**
      * Updates the state of the motion sensor for a specific channel
      * 
-     * @param channel - Channel number
+     * @param channel - Channel number (from 1)
      * @param hasMotion - true if there is motion, false otherwise
      */
     async updateMotion(channel: number, hasMotion: boolean): Promise<void> {
@@ -190,7 +190,7 @@ export default class HomeAssistantIntegration {
             throw new Error('MQTT client not initialized');
         }
 
-        const stateTopic = `${this.homeAssistantTopic}/device/atalaiaDahua/${this.serialNumber}/ch${channel}/motion`;
+        const stateTopic = `${this.homeAssistantTopic}/device/atalaiaDahua/${this.serialNumber}/ch${channel - 1}/motion`;
         const payload = hasMotion ? 'true' : 'false';
 
         return new Promise((resolve, reject) => {
@@ -209,7 +209,7 @@ export default class HomeAssistantIntegration {
     /**
      * Updates the state of the motion sensor for a specific channel
      * 
-     * @param channel - Channel number
+     * @param channel - Channel number (from 1)
      * @param hasPerson - true if there is a person, false otherwise
      */
     async updatePerson(channel: number, hasPerson: boolean): Promise<void> {
@@ -217,7 +217,7 @@ export default class HomeAssistantIntegration {
             throw new Error('MQTT client not initialized');
         }
 
-        const stateTopic = `${this.homeAssistantTopic}/device/atalaiaDahua/${this.serialNumber}/ch${channel}/person`;
+        const stateTopic = `${this.homeAssistantTopic}/device/atalaiaDahua/${this.serialNumber}/ch${channel - 1}/person`;
         const payload = hasPerson ? 'true' : 'false';
 
         return new Promise((resolve, reject) => {
@@ -226,7 +226,8 @@ export default class HomeAssistantIntegration {
                     console.error(`Error updating person for channel ${channel}:`, err);
                     reject(err);
                 } else {
-                    debugLog(`Person for channel ${channel} updated to: ${payload}`);
+                    // debugLog(`Person for channel ${channel} updated to: ${payload}`);
+                    console.info(`Person for channel ${channel} updated to: ${payload}`);
                     resolve();
                 }
             });

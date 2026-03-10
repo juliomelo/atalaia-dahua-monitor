@@ -1,7 +1,7 @@
 import { ChildProcess, exec } from 'node:child_process';
-import AtalaiaAMQP from './AtalaiaAMQP';
-import { IAtalaiaEvent, IAtalaiaRecorder } from './IAtalaiaRecorder';
-import { debugLog } from './debug';
+import AtalaiaAMQP from './AtalaiaAMQP.js';
+import { IAtalaiaEvent, IAtalaiaRecorder } from './IAtalaiaRecorder.js';
+import { debugLog } from './debug.js';
 
 interface IRecordingData {
     process: ChildProcess;
